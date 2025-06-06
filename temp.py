@@ -1,172 +1,118 @@
-import numpy as np
-from qiskit import QuantumCircuit, transpile
+import math
+from qiskit import QuantumCircuit, ClassicalRegister, QuantumRegister
+from math import pi
+from qiskit import transpile
 from qiskit_aer import Aer
-from qiskit.visualization import plot_histogram
-import matplotlib.pyplot as plt
 from qiskit.quantum_info import Statevector
 import matplotlib.pyplot as plt
-from collections import Counter
 import numpy as np
+import random
 
-NUM_RUNS = 10
-
-# Convert bitstrings to eigenvalues so that results of code are equivilant to theory described in the latex
-def _bit_to_eigen(bit): return +1 if bit == '0' else -1
-
-def plot_statevector_latex(qc):
-    """
-    Given a `qc`,
-    converts it to LaTeX bra-ket notation, and prints it.
-    """
-    psi = Statevector.from_instruction(qc)
-    latex_obj = psi.draw('latex')
-
-    # Clean up LaTeX string for matplotlib
-    latex_str = latex_obj.data.strip('$')
-    latex_str = f"${latex_str}$"
-
-    plt.figure(figsize=(8, 2))
-    plt.text(0.1, 0.5, latex_str, fontsize=20)
-    plt.axis('off')
-    plt.show()
-
-
-def check_parity_condition(alice_out, bob_out, row, column):
-    """
-    Check that Alice's outputs multiply to +1 (even parity),
-    Bob's outputs multiply to -1 (odd parity),
-    and their outputs agree on the intersection (row, column).
-    """
-    alice_parity_check = np.prod(alice_out) == +1
-    bob_parity_check = np.prod(bob_out) == -1
-    intersection_check = alice_out[row - 1] == bob_out[column - 1]
-    return alice_parity_check and bob_parity_check and intersection_check
-
-def _apply_basis_and_measure(qc, qubit, cbit, basis):
-    """Apply basis change before measurement on qubit, then measure to classical bit"""
+def measure_pauli(circ, qubit, basis):
     if basis == 'X':
-        qc.h(qubit)
+        circ.h(qubit)
     elif basis == 'Y':
-        qc.sdg(qubit)
-        qc.h(qubit)
-    # Z basis: no gate
+        circ.sdg(qubit)
+        circ.h(qubit)
+    # Z or I: do nothing
 
-    qc.measure(qubit, cbit)
+def apply_alice_measurement(circ, row, q0, q2, c0, c2):
+    if row == 0:  # I⊗X, X⊗I, X⊗X
+        measure_pauli(circ, q0, 'X')
+        measure_pauli(circ, q2, 'X')
+    elif row == 1:  # I⊗Z, Z⊗I, Z⊗Z
+        measure_pauli(circ, q0, 'Z')
+        measure_pauli(circ, q2, 'Z')
+    elif row == 2:  # X⊗Z, Z⊗X, Y⊗Y
+        circ.h(q0)
+        circ.h(q2)
+        circ.cz(q0, q2)
+        circ.h(q0)
+        circ.h(q2)
+    circ.measure(q0, c0)
+    circ.measure(q2, c2)
 
-def prepare_entangled_state():
-    qc = QuantumCircuit(4, 4)  # 4 qubits and 4 classical bits
+def apply_bob_measurement(circ, col, q1, q3, c1, c3):
+    if col == 0:  # I⊗X, I⊗Z, X⊗Z
+        measure_pauli(circ, q1, 'X')
+        measure_pauli(circ, q3, 'Z')
+    elif col == 1:  # X⊗I, Z⊗I, Z⊗X
+        measure_pauli(circ, q1, 'Z')
+        measure_pauli(circ, q3, 'X')
+    elif col == 2:  # X⊗X, Z⊗Z, Y⊗Y
+        circ.h(q1)
+        circ.h(q3)
+        circ.cz(q1, q3)
+        circ.h(q1)
+        circ.h(q3)
+    circ.measure(q1, c1)
+    circ.measure(q3, c3)
 
-    # create beta_00 from bits 0 and 1 (a1 and b1)
-    qc.h(0)  # Apply H to a1 (Alice's first qubit)
-    qc.cx(0, 1)  # Entangle a1 and b1 with a CNOT gate
+def simulate_round(row, col):
+    qc = QuantumCircuit(4, 4)
 
-    # create beta_00 from bits 2 and 3 (a2 and b2)
-    qc.h(2)  # Apply H to b1 (Bob's first qubit)
-    qc.cx(2, 3)  # Entangle a2 and b3 with a CNOT gate
+    # Prepare two Bell pairs: (q0, q1) and (q2, q3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.h(2)
+    qc.cx(2, 3)
 
-    # plot_statevector_latex(qc)
-    return qc
+    # Alice: qubits q0 and q2 → classical bits c0 and c2
+    apply_alice_measurement(qc, row, 0, 2, 0, 2)
 
+    # Bob: qubits q1 and q3 → classical bits c1 and c3
+    apply_bob_measurement(qc, col, 1, 3, 1, 3)
 
-# Alice measures row (1, 2, or 3) on q0, q2 and stores in c0, c2
-def alice_measure_row(qc, row):
-    if row == 1:
-        _apply_basis_and_measure(qc, 0, 0, 'Z')  # IZ
-        _apply_basis_and_measure(qc, 2, 2, 'Z')  # ZI
-    elif row == 2:
-        _apply_basis_and_measure(qc, 0, 0, 'X')  # XI
-        _apply_basis_and_measure(qc, 2, 2, 'X')  # IX
-    elif row == 3:
-        _apply_basis_and_measure(qc, 0, 0, 'Y')  # -XZ
-        _apply_basis_and_measure(qc, 2, 2, 'Y')  # -ZX
-    else:
-        raise ValueError("Row must be 1, 2, or 3")
-
-# Bob measures column (1, 2, or 3) on q1, q3 and stores in c1, c3
-def bob_measure_column(qc, column):
-    if column == 1:
-        _apply_basis_and_measure(qc, 1, 1, 'Z')  # IZ
-        _apply_basis_and_measure(qc, 3, 3, 'Z')  # ZI
-    elif column == 2:
-        _apply_basis_and_measure(qc, 1, 1, 'Z')  # ZI
-        _apply_basis_and_measure(qc, 3, 3, 'X')  # IX
-    elif column == 3:
-        _apply_basis_and_measure(qc, 1, 1, 'Y')  # -XZ
-        _apply_basis_and_measure(qc, 3, 3, 'Y')  # -ZX
-    else:
-        raise ValueError("Column must be 1, 2, or 3")
-
-
-def run_game(r, c):
-    qc = prepare_entangled_state()
-    alice_measure_row(qc, r)
-    bob_measure_column(qc, c)
-
+    # Run the circuit
     simulator = Aer.get_backend('qasm_simulator')
     compiled_circuit = transpile(qc, simulator)
-    result = simulator.run(compiled_circuit, shots=1).result()
-    counts = result.get_counts()
-    bitstring = list(counts.keys())[0]
+    result = simulator.run(compiled_circuit, shots=1, memory=True).result()
+    bits = result.get_memory()[0]  # format: 'c3c2c1c0'
 
-    # Reverse bitstring to match classical bits order c0,c1,c2,c3, this seems to be an oddity of quiskit
-    reversed_bits = bitstring[::-1]
-    bits = {
-        'a1': int(reversed_bits[0]),
-        'b1': int(reversed_bits[1]),
-        'a2': int(reversed_bits[2]),
-        'b2': int(reversed_bits[3]),
-    }
+    c0 = int(bits[3])
+    c1 = int(bits[2])
+    c2 = int(bits[1])
+    c3 = int(bits[0])
 
-    a1 = _bit_to_eigen(bits['a1'])
-    a2 = _bit_to_eigen(bits['a2'])
-    a3 = - (a1 * a2)  # always enforce even parity (product +1)
-    alice_out = [a1, a2, a3]
+    # Alice outputs: a0 = c0, a1 = ?, a2 = c2
+    # Bob outputs:   b0 = c1, b1 = ?, b2 = c3
 
-    b1 = _bit_to_eigen(bits['b1'])
-    b2 = _bit_to_eigen(bits['b2'])
-    b3 = - (b1 * b2)  # always enforce odd parity (product -1)
-    bob_out = [b1, b2, b3]
+    alice_outputs = [None, None, None]
+    bob_outputs   = [None, None, None]
 
-    outcome = 'WIN' if alice_out[r - 1] == bob_out[c - 1] and check_parity_condition(alice_out, bob_out, r, c) else 'LOSS'
-    return outcome, alice_out, bob_out
+    # Place outputs in correct positions
+    if row == 0:
+        alice_outputs = [c2, c0 ^ c2, c0]
+    elif row == 1:
+        alice_outputs = [c2, c0 ^ c2, c0]
+    elif row == 2:
+        alice_outputs = [c2, c0 ^ c2, c0]
 
+    if col == 0:
+        bob_outputs = [c1, c1 ^ c3, c3]
+    elif col == 1:
+        bob_outputs = [c1, c1 ^ c3, c3]
+    elif col == 2:
+        bob_outputs = [c1, c1 ^ c3, c3]
 
-def run_all_combinations(n=NUM_RUNS):
-    all_results = {}
-    for r in [1, 2, 3]:
-        for c in [1, 2, 3]:
-            results = {'WIN': 0, 'LOSS': 0}
-            for _ in range(n):
-                outcome, _, _ = run_game(r, c)
-                results[outcome] += 1
-            all_results[(r, c)] = results
-    return all_results
+    # Parity checks
+    row_parity = sum(alice_outputs) % 2  # Should be 0
+    col_parity = sum(bob_outputs) % 2    # Should be 1
 
+    # Consistency check: shared cell
+    shared_output_equal = (alice_outputs[col] == bob_outputs[row])
 
-def plot_win_loss_grid(all_results, n):
-    fig, axes = plt.subplots(3, 3, figsize=(12, 12), sharey=True)
+    win = (row_parity == 0) and (col_parity == 1) and shared_output_equal
+    return win
 
-    for r in range(1, 4):
-        for c in range(1, 4):
-            ax = axes[r - 1, c - 1]
-            res = all_results[(r, c)]
-            ax.bar(res.keys(), res.values(), color=['green', 'red'])
-            ax.set_ylim(0, n)
-            ax.set_title(f"Row {r}, Col {c}")
-            if c == 1:
-                ax.set_ylabel('Counts')
-            if r == 3:
-                ax.set_xlabel('Outcome')
+# Run many rounds
+rounds = 100
+wins = 0
 
-    plt.suptitle("Magic Square Game Win/Loss Counts")
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.show()
+for _ in range(rounds):
+    row = random.randint(0, 2)
+    col = random.randint(0, 2)
+    if simulate_round(row, col):
+        wins += 1
 
-
-def main():
-    all_results = run_all_combinations(n=NUM_RUNS)
-    plot_win_loss_grid(all_results, NUM_RUNS)
-
-
-if __name__ == "__main__":
-    main()
+print(f"Quantum strategy win rate: {wins}/{rounds} = {wins/rounds:.2%}")
